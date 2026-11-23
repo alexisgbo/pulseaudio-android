@@ -30,6 +30,23 @@ jobs:
             m4 make perl python3 git wget curl texinfo help2man zstd \
             libglib2.0-dev
 
+      - name: Compatibilidad Autotools para Libtool 2.4.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACLOCAL_BIN="$(command -v aclocal)"
+          AUTOMAKE_BIN="$(command -v automake)"
+          test -x "$ACLOCAL_BIN"
+          test -x "$AUTOMAKE_BIN"
+          # El Libtool incluido solicita las herramientas con sufijo 1.15.
+          # Ubuntu 22.04 instala Automake/ACLocal 1.16; son compatibles
+          # con el requisito minimo del proyecto, por lo que exponemos
+          # alias con los nombres antiguos que espera su script "missing".
+          sudo ln -sf "$ACLOCAL_BIN" /usr/local/bin/aclocal-1.15
+          sudo ln -sf "$AUTOMAKE_BIN" /usr/local/bin/automake-1.15
+          aclocal-1.15 --version | sed -n '1p'
+          automake-1.15 --version | sed -n '1p'
+
       - name: Instalar Android NDK r28c
         shell: bash
         run: |
