@@ -1,1 +1,163 @@
+name: Compilar PulseAudio 13 Android ARM64 16KB
 
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pulse-android-arm64:
+    name: PulseAudio 13 + AAudio / Android arm64-v8a / 16 KB
+    runs-on: ubuntu-22.04
+    timeout-minutes: 110
+    env:
+      NDK_REV: '28.2.13676358'
+    steps:
+      - name: Obtener el repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar herramientas de compilacion
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential autoconf automake autoconf-archive \
+            autopoint gettext intltool libtool libtool-bin pkg-config \
+            m4 make perl python3 git wget curl texinfo help2man zstd \
+            libglib2.0-dev
+
+      - name: Instalar Android NDK r28c
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK" ]]; then
+            echo 'ERROR: no se encontro ANDROID_HOME ni ANDROID_SDK_ROOT.' >&2
+            exit 1
+          fi
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            echo "ERROR: no se encontro sdkmanager en $SDKMANAGER" >&2
+            exit 1
+          fi
+          "$SDKMANAGER" --install "ndk;$NDK_REV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK_REV" >> "$GITHUB_ENV"
+          echo "NDK instalado: $SDK/ndk/$NDK_REV"
+
+      - name: Obtener fuentes faltantes de PulseAudio 13.0
+        run: |
+          set -euo pipefail
+          # La carpeta pulseaudio/ del ZIP original esta vacia.
+          rm -rf pulseaudio
+          git clone --depth 1 --branch v13.0 \
+            https://github.com/pulseaudio/pulseaudio.git pulseaudio
+          test -f pulseaudio/bootstrap.sh
+          test -f pulseaudio/configure.ac
+          echo 'Fuentes PulseAudio v13.0 encontradas.'
+
+      - name: Preparar script original para NDK r28 y 16 KB
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('main-build.sh')
+          s = p.read_text()
+          assert 'export NDK_PATH="/root/tools/android-ndk"' in s
+          assert 'export CFLAGS="-O2 -I$ROOT_DIR/include"' in s
+          s = s.replace('#!/bin/bash', '#!/bin/bash\nset -euo pipefail', 1)
+          s = s.replace('export NDK_PATH="/root/tools/android-ndk"',
+                        'export NDK_PATH="${ANDROID_NDK_HOME}"')
+          s = s.replace('export CFLAGS="-O2 -I$ROOT_DIR/include"',
+                        '''export CFLAGS="-O2 -fPIC -I$ROOT_DIR/include"
+          export CXXFLAGS="-O2 -fPIC -I$ROOT_DIR/include"
+          export CPPFLAGS="-I$ROOT_DIR/include"
+          export LDFLAGS="-L$ROOT_DIR/lib -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          export PKG_CONFIG_LIBDIR="$ROOT_DIR/lib/pkgconfig"''')
+          # Hace la compilacion repetible y copia contenido real de los symlinks .so.
+          s = s.replace('rm -r ', 'rm -rf ')
+          s = s.replace('cp -a ', 'cp -L ')
+          p.write_text(s)
+          PY
+          bash -n main-build.sh
+          echo 'Script preparado.'
+
+      - name: Compilar dependencias y PulseAudio ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          bash main-build.sh -a arm64 2>&1 | tee logs/compilacion.txt
+
+      - name: Compilar modulo AAudio ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs pulseaudio-module/build64
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$TOOLCHAIN/aarch64-linux-android26-clang"
+          "$CC" -O2 -fPIC -shared \
+            -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 \
+            -Ipulseaudio/build-arm64 -Ipulseaudio/src -Iroot-arm64/include \
+            -Lroot-arm64/lib/pulseaudio -Lroot-arm64/lib \
+            -o pulseaudio-module/build64/module-aaudio-sink.so \
+            pulseaudio-module/module-aaudio-sink.c \
+            -lpulsecore-13.0 -lpulsecommon-13.0 -lpulse -laaudio \
+            2>&1 | tee logs/aaudio.txt
+
+      - name: Preparar paquete y verificar ELF 16 KB
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p entrega/jniLibs/arm64-v8a entrega/assets entrega/pulseaudio/modules entrega/informes
+          BASE="output/aarch64-linux-gnu"
+          for lib in libpulseaudio.so libpulse.so libpulsecommon-13.0.so libpulsecore-13.0.so libltdl.so; do
+            test -f "$BASE/$lib"
+            cp -L "$BASE/$lib" "entrega/jniLibs/arm64-v8a/$lib"
+          done
+          for lib in libprotocol-native.so module-native-protocol-unix.so; do
+            test -f "$BASE/modules/$lib"
+            cp -L "$BASE/modules/$lib" "entrega/pulseaudio/modules/$lib"
+          done
+          cp -L pulseaudio-module/build64/module-aaudio-sink.so entrega/pulseaudio/modules/
+          tar -I 'zstd -19' -cf entrega/assets/pulseaudio.tzst -C entrega/pulseaudio .
+          python3 - <<'PY'
+          import pathlib, subprocess, sys
+          files = sorted(pathlib.Path('entrega/jniLibs/arm64-v8a').glob('*.so'))
+          files += sorted(pathlib.Path('entrega/pulseaudio/modules').glob('*.so'))
+          if len(files) != 8:
+              sys.exit(f'ERROR: esperaba 8 binarios, encontre {len(files)}')
+          lines = ['COMPROBACION ELF 16 KB - ARM64', '']
+          for f in files:
+              head = subprocess.check_output(['readelf', '-hW', str(f)], text=True)
+              if 'AArch64' not in head:
+                  sys.exit(f'ERROR: {f} no es AArch64')
+              data = subprocess.check_output(['readelf','-lW',str(f)], text=True)
+              aligns = []
+              for l in data.splitlines():
+                  cols = l.split()
+                  if cols and cols[0] == 'LOAD':
+                      aligns.append(int(cols[-1], 16))
+              if not aligns or any(a < 16384 for a in aligns):
+                  sys.exit(f'ERROR: {f.name}: alineaciones {aligns}')
+              needed = subprocess.check_output(['readelf','-dW',str(f)], text=True)
+              lines += [f'{f.name} : OK / LOAD {", ".join(hex(a) for a in aligns)}',
+                        '\n'.join('  '+x.strip() for x in needed.splitlines() if '(NEEDED)' in x),'']
+          pathlib.Path('entrega/informes/ELF-16KB.txt').write_text('\n'.join(lines))
+          print('\n'.join(lines))
+          PY
+          cp logs/*.txt entrega/informes/ || true
+          echo 'Verificacion ELF completada. Falta verificar compatibilidad ABI y comportamiento en dispositivo.'
+
+      - name: Subir resultados o registros de error
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pulseaudio-Android-arm64-16KB
+          path: |
+            entrega/
+            logs/
+          if-no-files-found: warn
