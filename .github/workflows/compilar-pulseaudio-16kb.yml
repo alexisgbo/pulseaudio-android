@@ -1,4 +1,4 @@
-name: Compilar PulseAudio 13 Android ARM64 16KB
+name: Compilar PulseAudio 13 Android ARM64 16KB (V5)
 
 on:
   push:
@@ -126,10 +126,32 @@ jobs:
           # Hace la compilacion repetible y copia contenido real de los symlinks .so.
           s = s.replace('rm -r ', 'rm -rf ')
           s = s.replace('cp -a ', 'cp -L ')
+          # PulseAudio 13 detecta execinfo.h, pero Android API 26 no declara
+          # backtrace()/backtrace_symbols() (se añadieron en API 33).
+          # Desactivar solo el backtrace opcional mantiene el mínimo API 26.
+          marker = 'export ac_cv_lib_ltdl_lt_dladvise_init=yes'
+          assert marker in s, 'No se encontro el bloque esperado en main-build.sh'
+          s = s.replace(marker, marker + '\nexport ac_cv_header_execinfo_h=no', 1)
+          configure_tail = '--disable-gsettings\n\nmake'
+          configure_check = '''--disable-gsettings
+
+          if grep -q '^#define HAVE_EXECINFO_H 1' config.h; then
+            echo 'Desactivando backtrace opcional: Android API 26 no ofrece estas funciones.'
+            sed -i 's/^#define HAVE_EXECINFO_H 1/\\/\\* #undef HAVE_EXECINFO_H \\*\\//' config.h
+          fi
+          if grep -q '^#define HAVE_EXECINFO_H 1' config.h; then
+            echo 'ERROR: HAVE_EXECINFO_H sigue habilitado.' >&2
+            exit 1
+          fi
+
+          make'''
+          assert configure_tail in s, 'No se encontro el final de configure en main-build.sh'
+          s = s.replace(configure_tail, configure_check, 1)
           p.write_text(s)
           PY
           bash -n main-build.sh
-          echo 'Script preparado.'
+          grep -nF 'export ac_cv_header_execinfo_h=no' main-build.sh
+          echo 'Script preparado: backtrace opcional desactivado para Android API 26.'
 
       - name: Compilar dependencias y PulseAudio ARM64
         shell: bash
