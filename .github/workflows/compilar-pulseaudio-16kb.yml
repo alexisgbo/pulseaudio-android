@@ -30,6 +30,21 @@ jobs:
             m4 make perl python3 git wget curl texinfo help2man zstd \
             libglib2.0-dev
 
+      - name: Compatibilidad con Autotools antiguos
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACLOCAL="$(command -v aclocal)"
+          AUTOMAKE="$(command -v automake)"
+          test -x "$ACLOCAL"
+          test -x "$AUTOMAKE"
+          sudo ln -sf "$ACLOCAL" /usr/local/bin/aclocal-1.15
+          sudo ln -sf "$AUTOMAKE" /usr/local/bin/automake-1.15
+          command -v aclocal-1.15
+          command -v automake-1.15
+          aclocal --version | head -n 1
+          automake --version | head -n 1
+
       - name: Instalar Android NDK r28c
         shell: bash
         run: |
@@ -51,6 +66,11 @@ jobs:
       - name: Obtener fuentes faltantes de PulseAudio 13.0
         run: |
           set -euo pipefail
+          # El repositorio base contiene una entrada antigua de submodulo sin URL.
+          # Se elimina porque PulseAudio se descarga explicitamente en el siguiente paso.
+          if [[ -f .gitmodules ]]; then
+            git config -f .gitmodules --remove-section submodule.pulseaudio 2>/dev/null || true
+          fi
           # La carpeta pulseaudio/ del ZIP original esta vacia.
           rm -rf pulseaudio
           git clone --depth 1 --branch v13.0 \
